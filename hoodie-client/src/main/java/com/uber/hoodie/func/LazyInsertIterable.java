@@ -28,6 +28,7 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import org.apache.log4j.LogManager;
@@ -60,18 +61,38 @@ public class LazyInsertIterable<T extends HoodieRecordPayload> extends LazyItera
     @Override protected void start() {
     }
 
+    static class RecordWrapper {
+        HoodieRecord hoodieRecord;
+
+        public RecordWrapper(HoodieRecord hoodieRecord) {
+            this.hoodieRecord = hoodieRecord;
+        }
+    }
 
     @Override protected List<WriteStatus> computeNext()  {
         List<WriteStatus> statuses = new ArrayList<>();
         AtomicLong timeTakenToFetchRecord = new AtomicLong(0);
         AtomicLong timeTakenToPreProcess = new AtomicLong(0);
         AtomicLong timeTakenToWrite = new AtomicLong(0);
+        LinkedBlockingQueue<RecordWrapper> recordQ = new LinkedBlockingQueue<>(2048);
+        new Thread(() -> {
+            while (inputItr.hasNext()) {
+                recordQ.offer(new RecordWrapper(inputItr.next()));
+            }
+            recordQ.offer(new RecordWrapper(null));
+        }).start();
         while (true) {
             long startFetchRecord = System.nanoTime();
-            if (!inputItr.hasNext()) {
+            RecordWrapper recordWrapper;
+            try {
+                recordWrapper = recordQ.take();
+            } catch (InterruptedException e) {
+                throw new RuntimeException(e);
+            }
+            if (recordWrapper.hoodieRecord == null) {
                 break;
             }
-            HoodieRecord record = inputItr.next();
+            HoodieRecord record = recordWrapper.hoodieRecord;
             long endFetchRecord = System.nanoTime();
             timeTakenToFetchRecord.addAndGet(endFetchRecord - startFetchRecord);
 
