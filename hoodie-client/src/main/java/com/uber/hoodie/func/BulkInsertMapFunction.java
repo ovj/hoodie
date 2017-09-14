@@ -16,16 +16,14 @@
 
 package com.uber.hoodie.func;
 
-import com.uber.hoodie.common.table.HoodieTableMetaClient;
-import com.uber.hoodie.config.HoodieWriteConfig;
 import com.uber.hoodie.WriteStatus;
 import com.uber.hoodie.common.model.HoodieRecord;
 import com.uber.hoodie.common.model.HoodieRecordPayload;
+import com.uber.hoodie.config.HoodieWriteConfig;
 import com.uber.hoodie.table.HoodieTable;
-import org.apache.spark.api.java.function.Function2;
-
 import java.util.Iterator;
 import java.util.List;
+import org.apache.spark.api.java.function.Function2;
 
 
 /**

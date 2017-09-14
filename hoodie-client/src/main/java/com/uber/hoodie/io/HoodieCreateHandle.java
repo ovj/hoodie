@@ -28,6 +28,7 @@ import com.uber.hoodie.exception.HoodieInsertException;
 import com.uber.hoodie.io.storage.HoodieStorageWriter;
 import com.uber.hoodie.io.storage.HoodieStorageWriterFactory;
 import com.uber.hoodie.table.HoodieTable;
+import java.util.concurrent.TimeUnit;
 import org.apache.avro.generic.IndexedRecord;
 import org.apache.hadoop.fs.Path;
 import org.apache.log4j.LogManager;
@@ -37,6 +38,7 @@ import org.apache.spark.TaskContext;
 import java.io.IOException;
 import java.util.Optional;
 import java.util.UUID;
+import scala.Tuple2;
 
 public class HoodieCreateHandle<T extends HoodieRecordPayload> extends HoodieIOHandle<T> {
     private static Logger logger = LogManager.getLogger(HoodieCreateHandle.class);
@@ -88,10 +90,12 @@ public class HoodieCreateHandle<T extends HoodieRecordPayload> extends HoodieIOH
      *
      * @param record
      */
-    public void write(HoodieRecord record) {
+    public Tuple2<Long, Long> write(HoodieRecord record) {
+        Tuple2<Long, Long> ret;
         try {
+            long startReprocessRecord = System.nanoTime();
             Optional<IndexedRecord> avroRecord = record.getData().getInsertValue(schema);
-
+            long endReporcessRecord = System.nanoTime();
             if(avroRecord.isPresent()) {
                 storageWriter.writeAvroWithMetadata(avroRecord.get(), record);
                 // update the new location of record, so we know where to find it next
@@ -100,15 +104,18 @@ public class HoodieCreateHandle<T extends HoodieRecordPayload> extends HoodieIOH
             } else {
                 recordsDeleted++;
             }
-
+            long endWriteRecord = System.nanoTime();
             record.deflate();
             status.markSuccess(record);
+            ret = new Tuple2<>(endReporcessRecord - startReprocessRecord, endWriteRecord - endReporcessRecord);
         } catch (Throwable t) {
             // Not throwing exception from here, since we don't want to fail the entire job
             // for a single record
             status.markFailure(record, t);
             logger.error("Error writing record " + record, t);
+            ret = new Tuple2<>(0l,0l);
         }
+        return ret;
     }
 
     /**

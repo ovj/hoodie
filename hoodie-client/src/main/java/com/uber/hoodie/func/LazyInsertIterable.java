@@ -16,21 +16,24 @@
 
 package com.uber.hoodie.func;
 
-import com.uber.hoodie.config.HoodieWriteConfig;
 import com.uber.hoodie.WriteStatus;
 import com.uber.hoodie.common.model.HoodieRecord;
 import com.uber.hoodie.common.model.HoodieRecordPayload;
-
-import com.uber.hoodie.io.HoodieIOHandle;
+import com.uber.hoodie.config.HoodieWriteConfig;
 import com.uber.hoodie.io.HoodieCreateHandle;
+import com.uber.hoodie.io.HoodieIOHandle;
 import com.uber.hoodie.table.HoodieTable;
-import org.apache.spark.TaskContext;
-
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import org.apache.log4j.LogManager;
+import org.apache.log4j.Logger;
+import org.apache.spark.TaskContext;
+import scala.Tuple2;
 
 /**
  * Lazy Iterable, that writes a stream of HoodieRecords sorted by the partitionPath,
@@ -38,6 +41,7 @@ import java.util.Set;
  */
 public class LazyInsertIterable<T extends HoodieRecordPayload> extends LazyIterableIterator<HoodieRecord<T>, List<WriteStatus>> {
 
+    private static Logger logger = LogManager.getLogger(LazyInsertIterable.class);
     private final HoodieWriteConfig hoodieConfig;
     private final String commitTime;
     private final HoodieTable<T> hoodieTable;
@@ -59,9 +63,17 @@ public class LazyInsertIterable<T extends HoodieRecordPayload> extends LazyItera
 
     @Override protected List<WriteStatus> computeNext()  {
         List<WriteStatus> statuses = new ArrayList<>();
-
-        while (inputItr.hasNext()) {
+        AtomicLong timeTakenToFetchRecord = new AtomicLong(0);
+        AtomicLong timeTakenToPreProcess = new AtomicLong(0);
+        AtomicLong timeTakenToWrite = new AtomicLong(0);
+        while (true) {
+            long startFetchRecord = System.nanoTime();
+            if (!inputItr.hasNext()) {
+                break;
+            }
             HoodieRecord record = inputItr.next();
+            long endFetchRecord = System.nanoTime();
+            timeTakenToFetchRecord.addAndGet(endFetchRecord - startFetchRecord);
 
             // clean up any partial failures
             if (!partitionsCleaned.contains(record.getPartitionPath())) {
@@ -84,7 +96,9 @@ public class LazyInsertIterable<T extends HoodieRecordPayload> extends LazyItera
 
             if (handle.canWrite(record)) {
                 // write the record, if the handle has capacity
-                handle.write(record);
+                final Tuple2<Long, Long> writeTime = handle.write(record);
+                timeTakenToPreProcess.addAndGet(writeTime._1());
+                timeTakenToWrite.addAndGet(writeTime._2());
             } else {
                 // handle is full.
                 statuses.add(handle.close());
@@ -103,7 +117,9 @@ public class LazyInsertIterable<T extends HoodieRecordPayload> extends LazyItera
                 statuses.add(handle.close());
             }
         }
-
+        logger.info("time to fetch :" + TimeUnit.NANOSECONDS.toSeconds(timeTakenToFetchRecord.get())
+            + " time to process :" + TimeUnit.NANOSECONDS.toSeconds(timeTakenToPreProcess.get())
+            + " time to write :" + TimeUnit.NANOSECONDS.toSeconds(timeTakenToWrite.get()));
         assert statuses.size() > 0; // should never return empty statuses
         return statuses;
     }
