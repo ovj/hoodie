@@ -74,82 +74,73 @@ public class LazyInsertIterable<T extends HoodieRecordPayload> extends LazyItera
         AtomicLong timeTakenToFetchRecord = new AtomicLong(0);
         AtomicLong timeTakenToPreProcess = new AtomicLong(0);
         AtomicLong timeTakenToWrite = new AtomicLong(0);
-        LinkedBlockingQueue<RecordWrapper> recordQ = new LinkedBlockingQueue<>(1024);
+        LinkedBlockingQueue<RecordWrapper> recordQ = new LinkedBlockingQueue<>(512);
         LinkedBlockingQueue<Boolean> isDone = new LinkedBlockingQueue<>();
         new Thread(() -> {
-            isDone.offer(true);
-            while (true) {
-                long startFetchRecord = System.nanoTime();
-                RecordWrapper recordWrapper;
-                try {
-                    recordWrapper = recordQ.take();
-                } catch (InterruptedException e) {
-                    isDone.offer(true);
-                    throw new RuntimeException(e);
-                }
-                if (recordWrapper.hoodieRecord == null) {
-                    break;
-                }
-                HoodieRecord record = recordWrapper.hoodieRecord;
-                long endFetchRecord = System.nanoTime();
-                timeTakenToFetchRecord.addAndGet(endFetchRecord - startFetchRecord);
-
-                // clean up any partial failures
-                if (!partitionsCleaned.contains(record.getPartitionPath())) {
-                    // This insert task could fail multiple times, but Spark will faithfully retry with
-                    // the same data again. Thus, before we open any files under a given partition, we
-                    // first delete any files in the same partitionPath written by same Spark partition
-                    HoodieIOHandle.cleanupTmpFilesFromCurrentCommit(hoodieConfig,
-                        commitTime,
-                        record.getPartitionPath(),
-                        TaskContext.getPartitionId());
-                    partitionsCleaned.add(record.getPartitionPath());
-                }
-
-                // lazily initialize the handle, for the first time
-                if (handle == null) {
-                    handle =
-                        new HoodieCreateHandle(hoodieConfig, commitTime, hoodieTable,
-                            record.getPartitionPath());
-                }
-
-                if (handle.canWrite(record)) {
-                    // write the record, if the handle has capacity
-                    final Tuple2<Long, Long> writeTime = handle.write(record);
-                    timeTakenToPreProcess.addAndGet(writeTime._1());
-                    timeTakenToWrite.addAndGet(writeTime._2());
-                } else {
-                    // handle is full.
-                    statuses.add(handle.close());
-                    // Need to handle the rejected record & open new handle
-                    handle =
-                        new HoodieCreateHandle(hoodieConfig, commitTime, hoodieTable,
-                            record.getPartitionPath());
-                    handle.write(record); // we should be able to write 1 record.
-                    break;
-                }
+            while (inputItr.hasNext()) {
+                HoodieRecord record = inputItr.next();
+                insertRecord(recordQ, new RecordWrapper(record));
             }
-
-            // If we exited out, because we ran out of records, just close the pending handle.
-            if (!inputItr.hasNext()) {
-                if (handle != null) {
-                    statuses.add(handle.close());
-                }
-            }
-            isDone.offer(true);
+            insertRecord(recordQ, new RecordWrapper(null));
         }).start();
 
-        try {isDone.take();} catch(InterruptedException e){}
+        while (true) {
+            long startFetchRecord = System.nanoTime();
+            RecordWrapper recordWrapper;
+            try {
+                recordWrapper = recordQ.take();
+            } catch (InterruptedException e) {
+                isDone.offer(true);
+                throw new RuntimeException(e);
+            }
+            if (recordWrapper.hoodieRecord == null) {
+                break;
+            }
+            HoodieRecord record = recordWrapper.hoodieRecord;
+            long endFetchRecord = System.nanoTime();
+            timeTakenToFetchRecord.addAndGet(endFetchRecord - startFetchRecord);
 
-        while (inputItr.hasNext()) {
-            HoodieRecord record = inputItr.next();
-            insertRecord(recordQ, new RecordWrapper(record));
+            // clean up any partial failures
+            if (!partitionsCleaned.contains(record.getPartitionPath())) {
+                // This insert task could fail multiple times, but Spark will faithfully retry with
+                // the same data again. Thus, before we open any files under a given partition, we
+                // first delete any files in the same partitionPath written by same Spark partition
+                HoodieIOHandle.cleanupTmpFilesFromCurrentCommit(hoodieConfig,
+                    commitTime,
+                    record.getPartitionPath(),
+                    TaskContext.getPartitionId());
+                partitionsCleaned.add(record.getPartitionPath());
+            }
+
+            // lazily initialize the handle, for the first time
+            if (handle == null) {
+                handle =
+                    new HoodieCreateHandle(hoodieConfig, commitTime, hoodieTable,
+                        record.getPartitionPath());
+            }
+
+            if (handle.canWrite(record)) {
+                // write the record, if the handle has capacity
+                final Tuple2<Long, Long> writeTime = handle.write(record);
+                timeTakenToPreProcess.addAndGet(writeTime._1());
+                timeTakenToWrite.addAndGet(writeTime._2());
+            } else {
+                // handle is full.
+                statuses.add(handle.close());
+                // Need to handle the rejected record & open new handle
+                handle =
+                    new HoodieCreateHandle(hoodieConfig, commitTime, hoodieTable,
+                        record.getPartitionPath());
+                handle.write(record); // we should be able to write 1 record.
+                break;
+            }
         }
-        insertRecord(recordQ, new RecordWrapper(null));
-        try {
-            isDone.take();
-        } catch (InterruptedException e) {
-            throw new RuntimeException(e);
+
+        // If we exited out, because we ran out of records, just close the pending handle.
+        if (!inputItr.hasNext()) {
+            if (handle != null) {
+                statuses.add(handle.close());
+            }
         }
         logger.info("time to fetch :" + TimeUnit.NANOSECONDS.toSeconds(timeTakenToFetchRecord.get())
             + " time to process :" + TimeUnit.NANOSECONDS.toSeconds(timeTakenToPreProcess.get())
