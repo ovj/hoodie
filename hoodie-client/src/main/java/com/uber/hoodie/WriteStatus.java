@@ -48,7 +48,7 @@ public class WriteStatus implements Serializable {
     private long totalErrorRecords = 0;
 
     public void markSuccess(HoodieRecord record) {
-        writtenRecords.add(record);
+        //writtenRecords.add(record);
         totalRecords++;
     }
 
